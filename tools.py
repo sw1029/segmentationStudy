@@ -39,57 +39,61 @@ def dataMaker():
     mask_list = []
 
     img_ids = coco.getImgIds()
+    NUM_CLASSES = 91  # 필요 시 80 또는 133으로 조정
+
     for img_id in img_ids:
-        # 이미지 정보 로드 및 전처리
         img_info = coco.loadImgs(img_id)[0]
         file_name = img_info['file_name']
         img_path = os.path.join(sample_image_path, file_name)
         image = Image.open(img_path).convert('RGB')
         image = transform(image)
 
-        # 해당 이미지의 annotation 로드
         ann_ids = coco.getAnnIds(imgIds=img_id)
         if len(ann_ids) == 0:
             continue
         anns = coco.loadAnns(ann_ids)
 
-        # 여러 annotation의 mask를 OR로 통합
         height, width = img_info['height'], img_info['width']
-        combined_mask = np.zeros((height, width), dtype=np.uint8)
-        for ann in anns:
-            mask_ann = coco.annToMask(ann)
-            combined_mask = np.maximum(combined_mask, mask_ann)
+        class_mask = np.zeros((height, width), dtype=np.uint8)  # class ID 저장용
 
-        # numpy mask -> tensor, (1, H, W)
-        mask_tensor = torch.tensor(combined_mask, dtype=torch.float32).unsqueeze(0)
-        # 1024x1024에 맞춰 resize
+        for ann in anns:
+            class_id = ann['category_id']  # COCO class ID
+            mask_ann = coco.annToMask(ann)  # [H, W]
+            class_mask = np.where((mask_ann == 1) & (class_mask == 0), class_id, class_mask)
+
+        # → torch.tensor로 변환 (shape: [H, W], 값: class_id)
+        mask_tensor = torch.tensor(class_mask, dtype=torch.long)
+
+        # Resize to 1024x1024
         if height != 1024 or width != 1024:
             mask_tensor = F.interpolate(
-                mask_tensor.unsqueeze(0),
+                mask_tensor.unsqueeze(0).float(),  # [1, H, W] → float for interpolate
                 size=(1024, 1024),
                 mode='nearest'
-            ).squeeze(0)
-        mask_tensor = mask_tensor.squeeze().squeeze()
+            ).squeeze(0).long()  # → [1024, 1024], long 다시 복원
+
+        # One-hot encoding → [H, W, C]
+        mask_tensor = F.one_hot(mask_tensor, num_classes=NUM_CLASSES)  # [H, W, C]
+        mask_tensor = mask_tensor.permute(2, 0, 1).float()  # [C, H, W]
 
         img_list.append(image)
         mask_list.append(mask_tensor)
+    # Dataset 생성
+    dataset = customDataset(img_list, mask_list)
 
-        # Dataset 생성
-        dataset = customDataset(img_list, mask_list)
+    # Train/Test split
+    dataset_size = len(dataset)
+    train_size = int(0.8 * dataset_size)
+    test_size = dataset_size - train_size
+    train_dataset, test_dataset = random_split(dataset, [train_size, test_size])
 
-        # Train/Test split
-        dataset_size = len(dataset)
-        train_size = int(0.8 * dataset_size)
-        test_size = dataset_size - train_size
-        train_dataset, test_dataset = random_split(dataset, [train_size, test_size])
+    train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True)
+    test_loader = DataLoader(test_dataset, batch_size=32, shuffle=False)
 
-        train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True)
-        test_loader = DataLoader(test_dataset, batch_size=32, shuffle=False)
-
-        return train_loader, test_loader
+    return train_loader, test_loader
 
 
-def model_train(model, device, criterion, optimizer, scheduler, dataloader_train, dataloader_valid, epochs=200):
+def model_train(model, device, criterion, optimizer, scheduler, dataloader_train, dataloader_valid, epochs=300):
     model.to(device)
     valid_loss_list = []
     valid_acc_list = []
@@ -107,10 +111,10 @@ def model_train(model, device, criterion, optimizer, scheduler, dataloader_train
         for batch in loop:
             img, label = batch
             img = img.to(device)  # (B, 3, 1024, 1024)
-            label = label.to(device)  # (B, 1, 1024, 1024)
+            label = label.to(device)  # [B,C,H,W]
 
             optimizer.zero_grad()
-            pred = model(img)
+            pred = model(img)#[B,C,H,W] 형태
             loss = criterion(pred, label)
             loss.backward()
             optimizer.step()
@@ -150,7 +154,7 @@ def model_valid(model, device, criterion, dataloader_valid):
             img = img.to(device)
             label = label.to(device)
 
-            pred = model(img)  # (B, 1, 1024, 1024)
+            pred = model(img)  # [B,C,H,W]
             loss = criterion(pred, label)
             total_loss += loss.item()
 

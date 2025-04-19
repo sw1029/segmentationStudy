@@ -2,11 +2,11 @@ import torch
 import torch.optim as optim
 import AutoEncoder
 import MaskRcnn
+import tools
 
 device = torch.device('cuda')
 
 model = AutoEncoder.AutoEncoder()
-
 
 optimizer = optim.SGD(model.parameters(),lr = 1e-3)
 criterion = torch.nn.BCEWithLogitsLoss()
@@ -22,3 +22,6 @@ else:
     print("plz use cpu")
     device = torch.device("cpu")
 
+trainloader,testloader = tools.datamaker()
+
+tools.model_train(model,device,criterion,optimizer,scheduler,trainloader,testloader)
